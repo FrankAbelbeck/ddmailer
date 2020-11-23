@@ -109,7 +109,7 @@ a local system mailbox:
 2. Regular user added to group ddmailer
 3. Inside /var/mail: MH mailbox, desktop access via Claws Mail
 
-## Installation
+## Installation: From Source
 
 The following steps assume being run on a standard Linux system with OpenRC as user root.
 Further it is assumed that $GITDIR equals your local ddmailer repo path.
@@ -130,6 +130,34 @@ NOTE: If you've already installed another MTA it might be that
 10. Start ddmailerd with `/etc/init.d/ddmailerd start`
 11. Test it with `echo -e "Subject: Test\r\nThis is a test" | sendmail info`
 
+## Installation: Gentoo
+
+I created four ebuilds which can be found in the `portage` subdirectory:
+
+1. acct-group/ddmailer/ddmailer-0.ebuild
+2. acct-user/ddmailer/ddmailer-0.ebuild
+3. mail-mta/ddmailer/ddmailer-9999.ebuild
+4. virtal/mta/mta-0.ebuild
+
+Copy these contents of `portage` into your local portage repository. You can
+find instruction for creating your own local portage repo in the [Gentoo Handbook](
+https://wiki.gentoo.org/wiki/Handbook:AMD64/Portage/CustomTree#Defining_a_custom_ebuild_repository).
+
+Run `repoman manifest` in every ebuild directory (builds the Manifest file).
+
+Mask the virtual/mta package of the official gentoo repository by issuing
+
+```bash
+echo "virtual/mta::gentoo" >> /etc/portage/package.mask
+```
+
+Now everytime a package requests an MTA, ddmailer will get automagically chosen.
+To install ddmailer, just run
+
+```bash
+emerge -1va virtual/mta
+```
+
 ## Changelog
 
- * **2020-11-23** Initial commit
+ * **2020-11-23** Initial commit; bugfixes (first time I wrote a complex ebuild)

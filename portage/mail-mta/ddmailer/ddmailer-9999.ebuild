@@ -8,6 +8,7 @@ LICENSE="GPL-3"
 KEYWORDS="amd64"
 RDEPEND="acct-user/ddmailer virtual/logger"
 EGIT_REPO_URI="https://github.com/FrankAbelbeck/ddmailer.git"
+SLOT="0"
 
 pkg_pretend() {
 	# check for existing /usr/sbin/sendmail program
@@ -23,9 +24,10 @@ src_install() {
 	# extract example configuration files and place them in /etc
 	# set permission so that main config is readable by all and account config
 	# is solely readable by root
-	${S}/src/ddmailerd cfgMain > /etc/ddmailerd.ini
-	${S}/src/ddmailerd cfgAccount > /etc/ddmailerd.account.ini
-	fperms 666 /etc/ddmailerd.ini
+	insinto /etc
+	${S}/sbin/ddmailerd cfgMain    | newins - ddmailerd.ini
+	${S}/sbin/ddmailerd cfgAccount | newins - ddmailerd.account.ini
+	fperms 644 /etc/ddmailerd.ini
 	fperms 600 /etc/ddmailerd.account.ini
 }
 
