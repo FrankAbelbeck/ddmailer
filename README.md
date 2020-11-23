@@ -67,7 +67,6 @@ ddmailerd accepts the following commands as single positional argument:
  * **info:** Print some information on ddmailerd.
  * **cfgMain:** Print contents of a basic main configuration file to stdout.
  * **cfgAccount:** Print contents of a basic account configuration file to stdout.
- * **openRC:** Print contents of an OpenRC init script file to stdout.
 
 ddmailerd does not manage a PID file. It uses the pre-defined UDP port as means
 of daemon control.

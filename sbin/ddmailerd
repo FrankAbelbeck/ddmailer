@@ -612,7 +612,6 @@ This program accepts the following commands as positional argument:
    info:       [this text]
    cfgMain:    Print contents of a basic main configuration file to stdout.
    cfgAccount: Print contents of a basic account configuration file to stdout.
-   openRC:     Print contents of an OpenRC init script file to stdout.
 """)
 	
 	def printConfigMain(self):
