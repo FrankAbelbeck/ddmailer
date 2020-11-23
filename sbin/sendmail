@@ -1,0 +1,133 @@
+#!/usr/bin/env python3
+"""Dead Drop Mailer Sendmail Replacement
+Copyright (C) 2020 Frank Abelbeck <frank.abelbeck@googlemail.com>
+
+This program is free software: you can redistribute it and/or modify
+it under the terms of the GNU General Public License as published by
+the Free Software Foundation, either version 3 of the License, or
+(at your option) any later version.
+
+This program is distributed in the hope that it will be useful,
+but WITHOUT ANY WARRANTY; without even the implied warranty of
+MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+GNU General Public License for more details.
+
+You should have received a copy of the GNU General Public License
+along with this program.  If not, see <http://www.gnu.org/licenses/>.
+"""
+
+#
+# Modules, register of used objects and functions()
+#
+import configparser # ConfigParser, Error
+import datetime # datetime.now(), timezone.utc
+import email.parser # BytesParser
+import email.policy # SMTP
+import getpass  # getuser()
+import platform # node()
+import socket   # AF_INET, SOCK_DGRAM, socket
+import sys      # argv, exit(), stdin
+import syslog   # LOG_ALERT, LOG_CRIT, LOG_DEBUG, LOG_EMERG, LOG_ERR, LOG_INFO,
+                # LOG_MAIL, LOG_NOTICE, LOG_WARNING, openlog(), syslog(), 
+
+#
+# hard-wired: pathes according to the filesystem hierarchy; listening on localhost
+#
+PATH_CONFIG = "/etc/ddmailerd.ini"
+HOST_DAEMON = "localhost"
+
+# look-up table for print() version of mylog
+LUTPRIO = {
+	syslog.LOG_EMERG:   "EMRG",
+	syslog.LOG_ALERT:   "ALRT",
+	syslog.LOG_CRIT:    "CRIT",
+	syslog.LOG_ERR:     "ERR ",
+	syslog.LOG_WARNING: "WARN",
+	syslog.LOG_NOTICE:  "NOTE",
+	syslog.LOG_INFO:    "INFO",
+	syslog.LOG_DEBUG:   "DBUG",
+}
+
+def mylog(priority=syslog.LOG_INFO,msg=""):
+	#syslog.syslog(priority,msg)
+	try:
+		print("[{}] {}".format(LUTPRIO[priority],msg))
+	except KeyError:
+		print(msg)
+
+#
+# main routine
+#
+if __name__ == "__main__":
+	hostname = platform.node()
+	syslog.openlog(ident="DDMailer sendmail",logoption=0,facility=syslog.LOG_MAIL)
+	
+	# read daemon configuration
+	cfgp = configparser.ConfigParser()
+	try:
+		cfgp.read(PATH_CONFIG)
+		if "daemon" not in cfgp:
+			raise configparser.Error("No daemon section")
+		try:
+			port_daemon = cfgp.getint("daemon","port")
+		except ValueError:
+			raise configparser.Error("No valid port integer defined")
+		try:
+			timeout_daemon = cfgp.getint("daemon","timeout")
+		except ValueError:
+			raise configparser.Error("No valid timeout integer defined")
+	except configparser.Error as e:
+			syslog.syslog(syslog.LOG_ERR,"Invalid configuration file ({})".format(e))
+			sys.exit(1)
+	
+	# process commandline arguments
+	# sys.argv[0] is the program file name
+	# get all positional arguments (i.e. not starting with -)
+	# these are the recipients; strip any @hostname as it is rewritten anyway
+	recipients = []
+	for arg in sys.argv[1:]:
+		if arg[0] != "-":
+			# only process non-positional arguments, i.e. not starting with a dash
+			if "@" not in arg: arg = arg + "@" + hostname
+			recipients.append(arg)
+	if len(recipients) == 0:
+		mylog(syslog.LOG_ERR,"No recipients given")
+		sys.exit(1)
+	
+	# read message from stdin until EOF or a line with a single dot.
+	# read directly from buffer in order to obtain bytes
+	messageBytes = b""
+	for line in sys.stdin.buffer:
+		if line == b".\n": break
+		messageBytes = messageBytes + line
+	parser = email.parser.BytesParser(policy=email.policy.SMTP)
+	message = parser.parsebytes(messageBytes)
+	
+	# construct message by rewriting To, From and Date
+	del message["From"]
+	message["From"] = getpass.getuser().partition("@")[0] + "@" + platform.node()
+	
+	del message["To"]
+	message["To"] = ", ".join(recipients)
+	
+	now = datetime.datetime.now(datetime.timezone.utc)
+	del message["Date"]
+	message["Date"] = now
+	
+	# send message to daemon
+	try:
+		udp = socket.socket(family=socket.AF_INET,type=socket.SOCK_DGRAM)
+	except OSError as e:
+		mylog(syslog.LOG_ERR,"Could not open UDP socket")
+		sys.exit(1)
+	
+	try:
+		udp.bind((HOST_DAEMON,port_daemon))
+	except OSError as e:
+		# bind failed: daemon listening; send message
+		udp.settimeout(timeout_daemon)
+		udp.sendmsg([message.as_bytes(policy=email.policy.SMTP)],[],0,(HOST_DAEMON,port_daemon))
+	else:
+		# bind succeeded: no daemon is listening: close, exit
+		udp.close()
+		mylog(syslog.LOG_ERR,"Could not send message, no active Dead Drop Mailer daemon found")

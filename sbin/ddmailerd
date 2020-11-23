@@ -1,0 +1,850 @@
+#!/usr/bin/env python3
+"""Dead Drop Mailer Daemon
+Copyright (C) 2020 Frank Abelbeck <frank.abelbeck@googlemail.com>
+
+This program is free software: you can redistribute it and/or modify
+it under the terms of the GNU General Public License as published by
+the Free Software Foundation, either version 3 of the License, or
+(at your option) any later version.
+
+This program is distributed in the hope that it will be useful,
+but WITHOUT ANY WARRANTY; without even the implied warranty of
+MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+GNU General Public License for more details.
+
+You should have received a copy of the GNU General Public License
+along with this program.  If not, see <http://www.gnu.org/licenses/>.
+"""
+
+#
+# Modules, register of used objects/functions()
+#
+import argparse # ArgumentParser
+import configparser # ConfigParser, Error
+import email.errors # MessageError
+import email.message # Message
+import email.parser # BytesParser
+import email.policy # SMTP
+import functools # partial
+import imaplib # IMAP4, IMAP4.error, IMAP4_SSL
+import mailbox # Mailbox, Maildir, MH, NoSuchMailboxError
+import os # chdir(), devnull, dup2(), environ, fork(), getpid(), getuid(),
+          # kill(), setgid(), setgroups(), setsid(), setuid(), umask()
+import os.path # exists()
+import pwd # getpwnam()
+import re # compile(), error
+import signal # signal(), SIGTERM
+import socket # AF_INET, SOCK_DGRAM, socket, timeout
+import sys # argv, exit(), stderr, stdin, stdout 
+import syslog # LOG_ALERT, LOG_CRIT, LOG_DEBUG, LOG_EMERG, LOG_ERR, LOG_INFO,
+              # LOG_MAIL, LOG_NOTICE, LOG_UPTO(), LOG_WARNING, openlog(),
+              # setlogmask(), syslog()
+
+
+#
+# Basic definitions 
+#
+# syslog identity of this program
+SYSLOG_IDENT = "DDMailer daemon"
+# pathes according to the filesystem hierarchy; listening on localhost
+PATH_CONFIG         = "/etc/ddmailerd.ini"
+PATH_CONFIG_ACCOUNT = "/etc/ddmailerd.account.ini"
+PATH_PID            = "/run/ddmailerd.pid"
+HOST_DAEMON         = "localhost"
+DEFAULT_DAEMONISE   = True
+DEFAULT_LOG_LEVEL   = "info"
+DEFAULT_LOG_STDOUT  = False
+DAEMON_USER = "ddmailer"
+
+
+class IMAPInfo:
+	"""Helper class for IMAP information.
+
+In the first place I tried to re-use imaplib.IMAP_SSL instances, so that the
+account management could rely on isinstance(). But connection re-use seems to be
+not allowed in the IMAP state machine. *shrugs*
+"""
+	def __init__(self,host,port,user,password,doesCramMD5,folder):
+		self._host = host
+		self._port = port
+		self._user = user
+		self._pass = password
+		self._doesCramMD5 = doesCramMD5
+		self._folder = folder
+
+
+class Daemon:
+	"""A class for a Dead Drop Mailer deamon."""
+	
+	# look-up tables for string to log level conversion
+	LUT_LEVEL2STR = {
+		syslog.LOG_EMERG:   "EMRG",
+		syslog.LOG_ALERT:   "ALRT",
+		syslog.LOG_CRIT:    "CRIT",
+		syslog.LOG_ERR:     "ERR ",
+		syslog.LOG_WARNING: "WARN",
+		syslog.LOG_NOTICE:  "NOTE",
+		syslog.LOG_INFO:    "INFO",
+		syslog.LOG_DEBUG:   "DBUG",
+	}
+	LUT_STR2LEVEL = {
+		"emergency": syslog.LOG_EMERG,
+		"alert": syslog.LOG_ALERT,
+		"critical": syslog.LOG_CRIT,
+		"error": syslog.LOG_ERR,
+		"warning": syslog.LOG_WARNING,
+		"notice": syslog.LOG_NOTICE,
+		"info": syslog.LOG_INFO,
+		"debug": syslog.LOG_DEBUG,
+	}
+	
+	def __init__(self,ident=SYSLOG_IDENT,pathConfigMain=PATH_CONFIG,pathConfigAccount=PATH_CONFIG_ACCOUNT):
+		"""Constructor: Initialise a daemon instance.
+
+Actions: Opens syslog, sets default log level and stores pathes.
+
+Args:
+   ident: the identity string in log messages.
+   pathConfigMain: a string, path to the main configuration file.
+   pathConfigAccount: a string, path to the account configuration file.
+
+Returns:
+   A Daemon instance.
+"""
+		syslog.openlog(ident=ident,logoption=0,facility=syslog.LOG_MAIL)
+		self._logLevel = self.LUT_STR2LEVEL[DEFAULT_LOG_LEVEL]
+		syslog.setlogmask(syslog.LOG_UPTO(self._logLevel))
+		self._logStdout = False
+		
+		self._doDaemonise = True
+		
+		self._pathConfigAccount = str(pathConfigAccount)
+		self._pathConfigMain = str(pathConfigMain)
+		
+		self._accounts = []
+		self._filters = { "from": [], "to":[], "subject":[] }
+	
+	
+	def parseConfigMain(self,withFilters=False):
+		"""Read and process the main configuration file.
+
+Args:
+   withFilters: a boolean; if True, also parse any filter sections.
+
+Raises:
+   FileExistsError: configuration file does not exist.
+   configparser.Error: parsing the configuration file failed.
+"""
+		if not os.path.exists(self._pathConfigMain): raise FileExistsError("main configuration file not found")
+		cfgp = configparser.ConfigParser()
+		cfgp.read(self._pathConfigMain)
+		
+		# required daemon settings
+		if "daemon" not in cfgp:
+			raise configparser.Error("No daemon section")
+		try:
+			self._portDaemon = cfgp.getint("daemon","port")
+		except ValueError:
+			raise configparser.Error("No valid port integer defined")
+		try:
+			self._timeoutDaemon = cfgp.getint("daemon","timeout")
+		except ValueError:
+			raise configparser.Error("No valid timeout integer defined")
+		
+		# optional deamon settings
+		try:
+			self._doDaemonise = cfgp.getboolean("daemon","daemonise",fallback=DEFAULT_DAEMONISE)
+		except ValueError:
+			pass
+		
+		try:
+			self._logStdout = cfgp.getboolean("daemon","log stdout",fallback=DEFAULT_LOG_STDOUT)
+		except ValueError:
+			pass
+			
+		try:
+			self._logLevel = self.LUT_STR2LEVEL[cfgp.get("daemon","log level",fallback=DEFAULT_LOG_LEVEL)]
+			syslog.setlogmask(syslog.LOG_UPTO(self._logLevel))
+		except KeyError:
+			pass
+		
+		if withFilters:
+			filters = { "from":[], "to":[], "subject":[] }
+			for section in cfgp:
+				# examine section string:
+				# filters start with "filter", followed by whitespace,
+				# followed by a field identifier ("from", "to", "subject"),
+				# followed by some unique identifier string
+				try:
+					str_filter,str_field,str_name = section.lower().split(maxsplit=2)
+				except ValueError:
+					continue
+				if str_filter != "filter" or str_field not in ("from","to","subject"):
+					continue
+				# valid filter section: get regular expression and substitute strings
+				try:
+					regex = cfgp.get(section,"regex")
+					subst = cfgp.get(section,"subst")
+				except configparser.Error:
+					# no regex or substitute? ignore
+					self.log(syslog.LOG_WARNING,"Filter section '{}' without regex or subst field".format(section))
+					continue
+				# compile regular expression, catch syntax errors
+				try:
+					pattern = re.compile(regex)
+				except re.error as e:
+					self.log(syslog.LOG_WARNING,"Invalid regular expression in '{}' ({})".format(section,e))
+				# try to apply substitue to a test string in order to identify invalid backreferences
+				try:
+					pattern.sub(subst,"test")
+				except re.error as e:
+					self.log(syslog.LOG_WARNING,"Invalid substitute string in '{}' ({})".format(section,e))
+				# all's fine: append partial pattern.sub function to filter list
+				# (that way subst is already compiled in, the filter function only needs the test string)
+				filters[str_field].append(functools.partial(pattern.sub,subst))
+			self._filters = filters
+	
+	
+	def parseConfigAccount(self):
+		"""Read and process the account configuration file.
+
+Raises:
+   FileExistsError: configuration file does not exist.
+   configparser.Error: parsing the configuration file failed.
+"""
+		
+		# read account configuration
+		if not os.path.exists(self._pathConfigAccount): raise FileExistsError("account configuration file not found")
+		cfgp = configparser.ConfigParser()
+		cfgp.read(self._pathConfigAccount)
+		accounts = []
+		for section in cfgp:
+			try:
+				str_type,str_name = section.lower().split(maxsplit=1)
+			except ValueError:
+				continue
+			
+			if str_type == "imaps":
+				# section describes an IMAP account: get data
+				host_imap = cfgp.get(section,"host")
+				if len(host_imap) == 0:
+					raise configparser.Error("No IMAP hostname defined")
+				try:
+					port_imap = cfgp.getint(section,"port")
+				except:
+					raise configparser.Error("No valid IMAP port integer defined")
+				user_imap = cfgp.get(section,"user")
+				if len(user_imap) == 0:
+					raise configparser.Error("No IMAP username defined")
+				pass_imap = cfgp.get(section,"pass")
+				folder_imap = cfgp.get(section,"folder")
+				if len(folder_imap) == 0:
+					raise configparser.Error("No IMAP folder defined")
+				
+				# validate account info
+				try:
+					imapbox = imaplib.IMAP4_SSL(host_imap,port_imap)
+					try:
+						status,data = imapbox.login_cram_md5(user_imap,pass_imap)
+						doesCramMD5 = True
+					except imaplib.IMAP4.error:
+						status,data = imapbox.login(user_imap,pass_imap)
+						doesCramMD5 = False
+					if status == "OK":
+						status,data = imapbox.select(folder_imap)
+						if status != "OK":
+							raise configparser.Error("Invalid IMAP account, could not access folder")
+						imapbox.close()
+						imapbox.logout()
+					else:
+						raise configparser.Error("Invalid IMAP account, unable to log in")
+				except imaplib.IMAP4.error as e:
+					raise configparser.Error("Accessing IMAP account failed ({})".format(e))
+				
+				# all fine: add to list of accounts
+				imapinfo = IMAPInfo(host_imap,port_imap,user_imap,pass_imap,doesCramMD5,folder_imap)
+				accounts.append(imapinfo)
+				
+			elif str_type in ("maildir","mh"):
+				# process maildir/MH mailbox info
+				path_mdir = cfgp.get(section,"path")
+				if len(path_mdir) == 0:
+					raise configparser.Error("No mailbox path defined")
+				folder_mdir = cfgp.get(section,"folder",fallback="") # folder is optional; if not set, use root dir
+				
+				# validate mailbox info
+				try:
+					if str_type == "maildir":
+						mbox = mailbox.Maildir(path_mdir,create=False)
+					elif str_type == "mh":
+						mbox = mailbox.MH(path_mdir,create=False)
+					if len(folder_mdir) > 0:
+						mbox = mbox.get_folder(folder_mdir)
+				except FileNotFoundError as e:
+					raise configparser.Error("Invalid mailbox path defined ({})".format(e))
+				except mailbox.NoSuchMailboxError as e:
+					raise configparser.Error("Given folder not found in mailbox ({})".format(e))
+				
+				# all fine: add to list of accounts
+				accounts.append(mbox)
+		self._accounts = accounts
+	
+	
+	def start(self):
+		"""Start the daemon.
+
+Raises:
+   PermissionError: daemon has to be started as root.
+   FileExistsError: configuration file not found.
+   OSError: socket could not be bound.
+   configparser.Error: invalid account configuration file."""
+		
+		# parse main configuration file with filter sections
+		try:
+			self.parseConfigMain(True)
+		except (configparser.Error,FileExistsError) as e:
+			self.log(syslog.LOG_ERR,"Parsing main configuration file failed ({})".format(e))
+			raise e
+		
+		if os.getuid() != 0:
+			self.log(syslog.LOG_ERR,"Only root starts the daemon")
+			raise PermissionError
+		
+		if os.path.exists(PATH_PID):
+			self.log(syslog.LOG_INFO,"PID file found, daemon already started")
+			raise FileExistsError
+		
+		# check if socket can be bound
+		try:
+			udp = socket.socket(family=socket.AF_INET,type=socket.SOCK_DGRAM)
+			udp.bind((HOST_DAEMON,self._portDaemon))
+		except OSError as e:
+			self.log(syslog.LOG_ERR,"UDP port {}:{} in use".format(HOST_DAEMON,self._portDaemon))
+			raise e
+		
+		# parse account configuration file
+		try:
+			self.parseConfigAccount()
+		except (configparser.Error,FileExistsError) as e:
+			self.log(syslog.LOG_ERR,"Parsing account configuration file failed ({})".format(e))
+			raise e
+		
+		# daemonise if necessary
+		if self._doDaemonise: self.daemonise()
+		
+		# write PID file
+		try:
+			with open(PATH_PID,"w") as f:
+				f.write(str(os.getpid()))
+		except OSError as e:
+			self.log(syslog.LOG_ERR,"Writing PID file failed ({})".format(e))
+			raise e
+		
+		# at this point root privileges are not needed anymore
+		try:
+			self.dropPrivileges()
+		except Exception as e:
+			self.log(syslog.LOG_ERR,"Daemon could not drop privileges ({})".format(e))
+			raise e
+		
+		self.log(syslog.LOG_INFO,"Dead Drop Mailer daemon started")
+		
+		# register signal handler for SIGTERM
+		signal.signal(signal.SIGTERM,self.doExit)
+		
+		# prepare e-mail parser
+		parser = email.parser.BytesParser(policy=email.policy.SMTP)
+		
+		# central processing loop:
+		#  - loop forever
+		#  - only terminated by exception (KeyboardInterrupt, triggered by signal SIGTERM)
+		#  - UDP-controlled: wait until new message arrives; process message
+		#  - message processing:
+		#     - check if it's a command ("PID"), answer it
+		#     - otherwise parse message bytes into email.message.Message object
+		#     - check that message is well-formed (to, from and subject set)
+		#     - filter message
+		#     - write to all accounts
+		try:
+			while True:
+				self.log(syslog.LOG_DEBUG,"Waiting for messages")
+				data,ancdata,flags,sender = udp.recvmsg(65536)
+				if data == b"OK?":
+					# received challenge: respond with "OK!"
+					udp.sendmsg([b"OK!"],[],0,sender)
+					
+				else:
+					# recevied a potential message: parse it
+					self.log(syslog.LOG_DEBUG,"Received a potential message, parsing it")
+					try:
+						message = parser.parsebytes(data)
+					except email.errors.MessageError as e:
+						self.log(syslog.LOG_WARNING,"Error while parsing message ({})".format(e))
+						continue
+					
+					if "To" not in message or "From" not in message or "Date" not in message:
+						self.log(syslog.LOG_WARNING,"Malformed message received")
+						continue
+					
+					self.log(syslog.LOG_DEBUG,"Filtering well-formed message")
+					#
+					# well-formed message received: filter it
+					# this is done by by chaining all filter functions (partial patter.sub)
+					# empty address strings will be dropped
+					# if filtering leads to empty "From" or "To" fields, message will be discarded
+					#
+					# 1) "from" header field
+					addresses = []
+					for address in [i.strip() for i in message["From"].split(",")]:
+						address = address.strip()
+						for fun_sub in self._filters["from"]:
+							address = fun_sub(address)
+						addresses.append(address)
+					if len(addresses) == 0:
+						self.log(syslog.LOG_WARNING,"Filters yielded empty 'From' field, message discarded")
+						continue
+					del message["From"]
+					message["From"] = ", ".join(addresses)
+					
+					# 2) "to" header field
+					addresses = []
+					for address in [i.strip() for i in message["To"].split(",")]:
+						address = address.strip()
+						for fun_sub in self._filters["to"]:
+							address = fun_sub(address)
+						addresses.append(address)
+					if len(addresses) == 0:
+						self.log(syslog.LOG_WARNING,"Filters yielded empty 'To' field, message discarded")
+						continue
+					del message["To"]
+					message["To"] = ", ".join(addresses)
+					
+					# 3) "subject" header field
+					if message["Subject"]:
+						subject = message["Subject"].strip()
+						for fun_sub in self._filters["subject"]:
+							subject = fun_sub(subject)
+						if len(subject) == 0:
+							self.log(syslog.LOG_WARNING,"Filters yielded empty 'Subject' field, message discarded")
+							continue
+						del message["Subject"]
+						message["Subject"] = subject
+					
+					#
+					# append filtered message to given accounts
+					#
+					for account in self._accounts:
+						if isinstance(account,IMAPInfo):
+							self.log(syslog.LOG_DEBUG,"appending to IMAP account...")
+							# re-open connection to IMAP account via SSL
+							# append message to folder, logout
+							try:
+								imapbox = imaplib.IMAP4_SSL(account._host,account._port)
+								if account._doesCramMD5:
+									status,data = imapbox.login_cram_md5(account._user,account._pass)
+								else:
+									status,data = imapbox.login(account._user,account._pass)
+								if status == "OK":
+									status,data = imapbox.append(account._folder,None,None,message.as_bytes())
+									if status != "OK":
+										self.log(syslog.LOG_WARNING,"Could not append message to IMAP mailbox (data={})".format(data))
+									imapbox.logout()
+								else:
+									self.log(syslog.LOG_WARNING,"Could not log into IMAP account (data={})",format(data))
+							except imaplib.IMAP4.error:
+								self.log(syslog.LOG_WARNING,"Error while accessing IMAP account (data={})",format(data))
+							
+						elif isinstance(account,mailbox.Mailbox):
+							self.log(syslog.LOG_DEBUG,"appending to mailbox...")
+							# write to Maildir/MH mailboxes
+							try:
+								account.add(message)
+							except Exception as e:
+								self.log(syslog.LOG_WARNING,"Could not write to mailbox {} ({})",format(account._path,e))
+			
+		except KeyboardInterrupt:
+			# received signal to exit
+			# deal with a possible "hanging" accounts
+			# (if signal arrived during account manipulation)
+			try:
+				imapbox.logout() # perhaps an IMAP mailbox was left open?
+			except:
+				pass
+			try:
+				account.close() # perhaps a mailbox was left open/locked?
+			except:
+				pass
+			
+			# close UDP socket
+			try:
+				udp.close()
+			except OSError as e:
+				self.log(syslog.LOG_WARNING,"Could not close UDP socket")
+			
+			self.log(syslog.LOG_INFO,"Dead Drop Mailer daemon stopped")
+	
+	
+	def stop(self):
+		"""Stop the daemon."""
+		
+		if os.getuid() != 0:
+			self.log(syslog.LOG_ERR,"Only root stops the daemon")
+			raise PermissionError
+		
+		# Retrieve PID
+		try:
+			with open(PATH_PID,"r") as f:
+				pid = int(f.read())
+		except FileNotFoundError:
+			self.log(syslog.LOG_INFO,"PID file not found, daemon seems inactive")
+			return
+		except (PermissionError,OSError,TypeError,ValueError):
+			self.log(syslog.LOG_WARNING,"Could not parse PID file, daemon did not start properly")
+			return
+		
+		# Send SIGTERM to PID
+		try:
+			os.kill(pid,signal.SIGTERM)
+		except ProcessLookupError as e:
+			self.log(syslog.LOG_WARNING,"Could not find process {}, removing stale PID file".format(pid))
+			os.remove(PATH_PID)
+			return
+		except PermissionError as e:
+			# should not occur, since only root is allowed to handle daemon shutdown
+			self.log(syslog.LOG_INFO,"You are not allowed to shutdown the daemon")
+			raise e
+		
+		# Wait for termination and remove PID file
+		try:
+			os.waitpid(pid,0)
+		except ChildProcessError:
+			pass # nevermind, PID already has terminated
+		try:
+			os.remove(PATH_PID)
+		except OSError as e:
+			self.log(syslog.LOG_INFO,"Error during process shutdown")
+			raise e
+	
+	
+	def status(self):
+		"""Check status of daemon and exit with a code describing the status.
+
+Exit code is chosen according to the Linux Standard Base 5.0:
+   0: daemon is running or service is OK
+   1: daemon is dead and UDP socket is bound
+   3: daemon is not running
+   4: daemon status is unknown
+"""
+		# parse main configuration file without filter sections
+		self.parseConfigMain()
+		
+		# check state of the daemon and return with a code according to the Linux Standard Base
+		# https://refspecs.linuxbase.org/LSB_5.0.0/LSB-Core-generic/LSB-Core-generic/iniscrptact.html
+		#
+		# 0         program is running or service is OK
+		# 1         program is dead and /var/run pid file exists
+		# 2         program is dead and /var/lock lock file exists
+		# 3         program is not running
+		# 4         program or service status is unknown
+		# 5-99      reserved for future LSB use
+		# 100-149   reserved for distribution use
+		# 150-199   reserved for application use
+		# 200-254   reserved
+		if os.path.exists(PATH_PID):
+			try:
+				udp = socket.socket(family=socket.AF_INET,type=socket.SOCK_DGRAM)
+				udp.settimeout(self._timeoutDaemon)
+				udp.sendmsg([b"OK?"],[],0,(HOST_DAEMON,self._portDaemon))
+				try:
+					data,ancdata,flags,sender = udp.recvmsg(65536)
+				except socket.timeout:
+					# someone listening, but not responding to challenge
+					sys.exit(1)
+				if data == "bOK!":
+					# correct response, daemon is OK
+					sys.exit(0)
+				else:
+					# someone listening, but not responding to challenge
+					sys.exit(1)
+			except OSError as e:
+				self.log(syslog.LOG_ERR,"UDP communication failed, daemon state unknown ({e})".format(e))
+				sys.exit(4)
+		else:
+			# no PID file found: deamon not active
+			sys.exit(3)
+	
+	
+	def printInfo(self):
+		"""Print info on program to stdout."""
+		print("""Dead Drop Mailer Daemon
+Copyright (C) 2020 Frank Abelbeck <frank.abelbeck@googlemail.com>
+License: GLP 3
+
+Overview
+--------
+
+This is a mail transfer deamon, handling system-local e-mails. It will accept
+messages on a given local UDP port and will add them to mailboxes or IMAP
+accounts defined in the configuration files. In addition, filters can be applied
+to the header fields "From", "To" and "Subject".
+
+Commands
+--------
+
+This program accepts the following commands as positional argument:
+
+   start:   Start the program; reads the configuration files, writes PID file
+            and listens on the defined UDP port at localhost; if it receives a
+            datagram with the bytes "OK?", it responds wit "OK!". Otherwise it
+            processes the message and delivers it to the accounts.
+   stop:    Stop the program; retrieves PID from the PID file and sends SIGTERM
+            to that PID. This in turn breaks the processing loop of the running
+            program, so that it gracefully terminates.
+   status:  Checks if a PID file existis. If that's the case, it challenges the
+            daemon with "OK?". The program exits with the following codes
+            (cf. Linux Standard Base 5.0):
+            
+              0: PID file exists, daemon respons with "OK!"; service is OK
+              1: PID file exists, but no or wrong response; service not OK
+              3: PID file does not exist; service is not running
+              4: PID file exists, but UDP communication failed; status unknown
+              
+   info:       [this text]
+   cfgMain:    Print contents of a basic main configuration file to stdout.
+   cfgAccount: Print contents of a basic account configuration file to stdout.
+   openRC:     Print contents of an OpenRC init script file to stdout.
+""")
+	
+	def printConfigMain(self):
+		print("""# Dead Drop Mailer
+# Main configuration file
+# INI file syntax; comments begin either with a # or a ;
+# Explanations are commented out with #
+# Example values are commented out with ;
+#
+# You have to define port and timeout in a section called "daemon"
+# as there are no defaults for it
+#
+[daemon]
+# required: port to listen on and socket timeout in seconds
+port = 4242
+timeout = 1
+
+# Option: Should program background itself?
+# Values: yes no
+# Default: yes
+;daemonise = yes
+
+# Option: Set minimal log level; all program messages with the same or higher
+#         log priority level are logged, program messages with lower log level
+#         will be discarded
+# Values in ascending priority order:
+#    debug info notice warning error critical alert emergency
+# Default: info
+;log level = info
+
+# Option: Should program messages be printed to stdout instead of being logged
+#         by the system logger?
+#         NOTE: a daemonised program is detached from stdout
+# Values: yes no
+# Default: no
+;log stdout = no
+
+# Filter definition
+#
+# Create sections using the following, case-insensitive naming scheme
+#    "filter [to|from|subject] identifier"
+#
+# Each section has to contain a "regex" (regular expression string) and a
+# "subst" (substitute string) definition.
+#
+# The filters will be applied in the order of their declaration. Each filter
+# is treated as a substitution operation, matching the regular expression and
+# replacing it with the substitute string. Backreferences are allowed.
+#
+# The fields "From" and "To" are split into individual addresses and the
+# corresponding filters are applied to each address separately.
+#
+# Should the chained application of filters result in empty "From", "To"
+# and/or "Subject" fields, the message is discarded.
+
+;[filter to example 1]
+# delete recipient addresses with the substring "sendmail"
+;regex = .*sendmail.*
+;subst = 
+
+;[filter from example 2]
+# replace all occurences of 'bla' in a "From" field with 'ble'
+;regex = bla
+;subst = ble
+""")
+	
+	def printConfigAccount(self):
+		print("""# Dead Drop Mailer
+# Account configuration file
+# INI file syntax; comments begin either with a # or a ;
+# Explanations are commented out with #
+# Example values are commented out with ;
+#
+# This file defines mailboxes in Maildir or MH format and IMAP accounts.
+# Incoming messages will be appended to these mailboxes.
+#
+# WARNING! This file should be read-restricted to the user root as it
+# could contain login names and passwords (chmod 0600)! ddmailerd is the only
+# program reading this file and it does this prior to dropping privileges.
+#
+# Account definition
+#
+# Create sections using the following, case-insensitive naming scheme
+#    "[imaps|maildir|mh] identifier"
+#
+# The leading substring defines the type of the account (imaps, maildir or mh).
+
+;[IMAPS Account 1]
+# TLS-encrypted imap account access: defining URL, user credentials and
+# specifying the target folder inside the account's folder strutcture
+# field folder has to be non-empty!
+;host = host.name.of.service
+;port = 993
+;user = username
+;pass = password
+;folder = ExampleFolder
+
+;[Maildir Account 1]
+# Maildir mailbox access: defining path to a Maildir structure and specifying
+# the target folder; if target folder is not defined or empty, the root folder
+# is used.
+# ATTENTION: The user "ddmailer" needs read/write access to the given path!
+;path = /path/to/Maildir/mailbox
+;folder = 
+
+;[MH Account 1]
+# cf. Maildir Account 1
+;path = /path/to/MH/mailbox
+;folder = inbox
+""")
+	
+	
+	def log(self, priority=syslog.LOG_INFO, msg=""):
+		"""Log a message with given priority.
+
+Args:
+   priority: an integer, cf. module syslog for constants; defaults to LOG_INFO.
+   msg: the message string."""
+		if self._logStdout and priority <= self._logLevel:
+			try:
+				print("[{}] {}".format(self.LUT_LEVEL2STR[priority],msg))
+			except KeyError:
+				print("[----] {}".format(msg))
+		else:
+			syslog.syslog(priority,msg)
+	
+	
+	def dropPrivileges(self):
+		"""Drop privileges to another user.
+
+Raises:
+   OSError: adjusting uid/gid failed."""
+		# obtain DAEMON_USER data
+		p = pwd.getpwnam(DAEMON_USER)
+		# set file permissions mask (ug+rwx,o-rwx)
+		os.umask(0o007)
+		# remove group privileges
+		os.setgroups([])
+		# set user and group ID
+		os.setgid(p.pw_gid)
+		os.setuid(p.pw_uid)
+		# safety catch 
+		if os.getuid() == 0: raise OSError("privileges not dropped")
+		# reset home directory environment variable
+		os.environ['HOME'] = p.pw_dir
+		# switch to the directory root as it's always present
+		os.chdir("/")
+		self.log(syslog.LOG_INFO,"Privileges dropped")
+	
+	
+	def daemonise(self):
+		"""Put program into background.
+		
+Do a double fork to prevent zombies. Second fork prevents child from being
+session leader and thus prevents it from acquiring a (controlling) terminal.
+
+Changes user ID to the owner of this program file.
+
+Raises:
+   OSError: double fork failed.
+"""
+		
+		# do first fork, i.e. split a child process and exit if successful
+		# fork() clones the process and lets both processes continue at this
+		# position; the parent process receives the child's PID as result,
+		# while the child receives a 0.
+		try:
+			pid = os.fork()
+			if pid > 0: # fork returned a PID: this is the parent process, exit!
+				sys.exit(0)
+		except OSError as e:
+			self.log(syslog.LOG_ERR,"First fork failed: {}".format(e))
+			raise e
+		
+		# now this process continues as the first child
+		# let this first child process become a session leader
+		os.setsid()
+		
+		# do 2nd fork, i.e. split another child process and exit if successful
+		try:
+			pid = os.fork()
+			if pid > 0:
+				# first child as a session leader should exit, thus leaving
+				# child no. 2 orphaned without ability to open a controlling
+				# terminal and thus preventing zombie processes
+				sys.exit(0)
+		except OSError as e:
+			self.log(syslog.LOG_ERR,"Second fork failed: {}".format(e))
+			raise e
+		
+		# next step: redirect input/output/error file descriptors
+		sys.stdout.flush()
+		sys.stderr.flush()
+		stdin  = open(os.devnull,"r")
+		stdout = open(os.devnull,"a+")
+		stderr = open(os.devnull,"a+")
+		os.dup2(stdin.fileno(),sys.stdin.fileno())
+		os.dup2(stdout.fileno(),sys.stdout.fileno())
+		os.dup2(stderr.fileno(),sys.stderr.fileno())
+	
+		# now this process continues as the second child
+		self.log(syslog.LOG_INFO,"Daemonised")
+	
+	
+	def doExit(self,signum,frame):
+		"""Hook for the signal SIGTERM; raises KeyboardInterrupt."""
+		raise KeyboardInterrupt
+
+
+#
+# main routine
+#
+if __name__ == "__main__":
+	# setup daemon and parse main config
+	daemon = Daemon()
+	parser = argparse.ArgumentParser(description='Dead Drop Mailer Daemon: distributes system e-mail by writing them to pre-defined accounts/mailboxes.')
+	subparsers = parser.add_subparsers()
+	subparser_start = subparsers.add_parser("start",help="Start the daemon")
+	subparser_start.set_defaults(f=daemon.start)
+	subparser_stop = subparsers.add_parser("stop",help="Stop the daemon")
+	subparser_stop.set_defaults(f=daemon.stop)
+	subparser_status = subparsers.add_parser("status",help="Check daemon status and return it as exit code")
+	subparser_status.set_defaults(f=daemon.status)
+	subparser_info = subparsers.add_parser("info",help="Display information on this program")
+	subparser_info.set_defaults(f=daemon.printInfo)
+	subparser_info = subparsers.add_parser("cfgMain",help="Print basic main configuration file")
+	subparser_info.set_defaults(f=daemon.printConfigMain)
+	subparser_info = subparsers.add_parser("cfgAccount",help="Print basic account configuration file")
+	subparser_info.set_defaults(f=daemon.printConfigAccount)
+	args = parser.parse_args()
+	try:
+		args.f()
+	except Exception as e:
+		sys.exit(4)
+	
