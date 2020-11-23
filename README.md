@@ -148,7 +148,7 @@ Run `repoman manifest` in every ebuild directory (builds the Manifest file).
 Mask the virtual/mta package of the official gentoo repository by issuing
 
 ```bash
-echo "virtual/mta::gentoo" >> /etc/portage/package.mask
+echo "virtual/mta::gentoo" >> /etc/portage/package.mask/virtual
 ```
 
 Now everytime a package requests an MTA, ddmailer will get automagically chosen.
