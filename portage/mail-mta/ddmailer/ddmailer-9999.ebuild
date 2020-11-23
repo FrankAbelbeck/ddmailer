@@ -6,14 +6,15 @@ DESCRIPTION="Dead Drop Mailer is a simple SMTP-avoiding mail transfer agent writ
 HOMEPAGE="https://github.com/FrankAbelbeck"
 LICENSE="GPL-3"
 KEYWORDS="amd64"
+DEPEND="app-portage/gentoolkit"
 RDEPEND="acct-user/ddmailer virtual/logger"
 EGIT_REPO_URI="https://github.com/FrankAbelbeck/ddmailer.git"
 SLOT="0"
 
 pkg_pretend() {
-	# check for existing /usr/sbin/sendmail program
+	# check for existing /usr/sbin/sendmail program not belonging to ddmailer
 	# if found, that collision is not resolvable
-	[ -e /usr/sbin/sendmail ] && die "Found an existing sendmail program. Sorry, cannot install DDMailer alongside another MTA."
+	[ -e /usr/sbin/sendmail ] && [[ "$(equery --quiet belongs /usr/sbin/sendmail)" != "mail-mta/ddmailer-9999" ]] && die "Found an existing sendmail program not belonging to ddmailer. Sorry, cannot install DDMailer alongside another MTA."
 }
 
 src_install() {
