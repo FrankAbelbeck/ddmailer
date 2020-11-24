@@ -136,7 +136,7 @@ I created four ebuilds which can be found in the `portage` subdirectory:
 1. acct-group/ddmailer/ddmailer-0.ebuild
 2. acct-user/ddmailer/ddmailer-0.ebuild
 3. mail-mta/ddmailer/ddmailer-9999.ebuild
-4. virtal/mta/mta-0.ebuild
+4. virtual/mta/mta-0.ebuild
 
 Copy these contents of `portage` into your local portage repository. You can
 find instruction for creating your own local portage repo in the [Gentoo Handbook](
