@@ -40,7 +40,9 @@ written in Python so you can easily look what they are doing.
    reached. Then it creates an RFC-compliant e-mail and addresses it to the
    recipients given as positional arguments. Or in other words: it mimics the
    original sendmail's behaviour except for any commandline options (ignored).
-   The created e-mail is sent to the UDP port of ddmailerd.
+   The created e-mail is sent to the UDP port of ddmailerd. To avoid size error
+   exceptions the e-mail is clipped at 65507 bytes (maximum datagram size
+   2**16-1 minus 8 bytes UDP header minus 20 bytes IPv4 header). 
 
 ## Daemon Commands
 
@@ -160,3 +162,5 @@ emerge -1va virtual/mta
 ## Changelog
 
  * **2020-11-23** Initial commit; bugfixes (first time I wrote a complex ebuild)
+
+ * **2020-11-27** Introduced message limit in sendmail to avoid errno 90 exceptions

@@ -35,6 +35,7 @@ import syslog   # LOG_ALERT, LOG_CRIT, LOG_DEBUG, LOG_EMERG, LOG_ERR, LOG_INFO,
 #
 PATH_CONFIG = "/etc/ddmailerd.ini"
 HOST_DAEMON = "localhost"
+LEN_DGRAM_MAX = 65507 # 2**16 -1 -8 -20
 
 # look-up table for print() version of mylog
 LUTPRIO = {
@@ -126,7 +127,10 @@ if __name__ == "__main__":
 	except OSError as e:
 		# bind failed: daemon listening; send message
 		udp.settimeout(timeout_daemon)
-		udp.sendmsg([message.as_bytes(policy=email.policy.SMTP)],[],0,(HOST_DAEMON,port_daemon))
+		try:
+			udp.sendmsg([message.as_bytes(policy=email.policy.SMTP)[0:LEN_DGRAM_MAX]],[],0,(HOST_DAEMON,port_daemon))
+		except OSError as e:
+			mylog(syslog.LOG_ERR,"Message not sent ({})".format(e))
 	else:
 		# bind succeeded: no daemon is listening: close, exit
 		udp.close()
