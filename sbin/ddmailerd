@@ -44,6 +44,8 @@ import syslog # LOG_ALERT, LOG_CRIT, LOG_DEBUG, LOG_EMERG, LOG_ERR, LOG_INFO,
 #
 # Basic definitions 
 #
+PY2CFG_BOOL = { True:"yes", False:"no" }
+
 # syslog identity of this program
 SYSLOG_IDENT = "DDMailer daemon"
 # pathes according to the filesystem hierarchy; listening on localhost
@@ -54,7 +56,7 @@ HOST_DAEMON         = "localhost"
 DEFAULT_DAEMONISE   = True
 DEFAULT_LOG_LEVEL   = "info"
 DEFAULT_LOG_STDOUT  = False
-DAEMON_USER = "ddmailer"
+USER_DAEMON = "ddmailer"
 
 
 class IMAPInfo:
@@ -631,23 +633,23 @@ timeout = 1
 
 # Option: Should program background itself?
 # Values: yes no
-# Default: yes
-;daemonise = yes
+# Default: {DAEMONISE}
+;daemonise = {DAEMONISE}
 
 # Option: Set minimal log level; all program messages with the same or higher
 #         log priority level are logged, program messages with lower log level
 #         will be discarded
 # Values in ascending priority order:
 #    debug info notice warning error critical alert emergency
-# Default: info
-;log level = info
+# Default: {LOGLEVEL}
+;log level = {LOGLEVEL}
 
 # Option: Should program messages be printed to stdout instead of being logged
 #         by the system logger?
 #         NOTE: a daemonised program is detached from stdout
 # Values: yes no
-# Default: no
-;log stdout = no
+# Default: {LOGSTDOUT}
+;log stdout = {LOGSTDOUT}
 
 # Filter definition
 #
@@ -676,7 +678,11 @@ timeout = 1
 # replace all occurences of 'bla' in a "From" field with 'ble'
 ;regex = bla
 ;subst = ble
-""")
+""".format(
+		DAEMONISE = PY2CFG_BOOL[DEFAULT_DAEMONISE],
+		LOGLEVEL  = DEFAULT_LOG_LEVEL,
+		LOGSTDOUT = PY2CFG_BOOL[DEFAULT_LOG_STDOUT])
+	)
 	
 	def printConfigAccount(self):
 		print("""# Dead Drop Mailer
@@ -744,8 +750,8 @@ Args:
 
 Raises:
    OSError: adjusting uid/gid failed."""
-		# obtain DAEMON_USER data
-		p = pwd.getpwnam(DAEMON_USER)
+		# obtain USER_DAEMON data
+		p = pwd.getpwnam(USER_DAEMON)
 		# set file permissions mask (ug+rwx,o-rwx)
 		os.umask(0o007)
 		# remove group privileges
@@ -844,6 +850,8 @@ if __name__ == "__main__":
 	args = parser.parse_args()
 	try:
 		args.f()
+	except AttributeError:
+		daemon.printInfo()
 	except Exception as e:
 		sys.exit(4)
 	

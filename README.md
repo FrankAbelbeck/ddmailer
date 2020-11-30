@@ -118,8 +118,8 @@ Further it is assumed that $GITDIR equals your local ddmailer repo path.
 NOTE: If you've already installed another MTA it might be that
 /usr/sbin/sendmail exists. In that case it's up to you to resolve the conflict.
 
-1. Place `$GITDIR/sbin/ddmailerd` and `$GITDIR/sbin/sendmail` in `/usr/sbin`
-2. Place `$GITDIR/openrc/ddmailerd` in `/etc/init.d`
+1. Place `$GITDIR/sbin/ddmailerd` and `$GITDIR/sbin/sendmail` in `/usr/sbin/`
+2. Place `$GITDIR/openrc/ddmailerd` in `/etc/init.d/`
 3. Set permissions with `chmod 755 /etc/init.d/ddmailerd /usr/sbin/ddmailerd /usr/sbin/sendmail`
 4. Create basic main configuration file with `/usr/sbin/ddmailerd cfgMain > /etc/ddmailerd.ini`
 5. Create basic account configuration file with `/usr/sbin/ddmailerd cfgAccount > /etc/ddmailerd.account.ini`
@@ -128,8 +128,8 @@ NOTE: If you've already installed another MTA it might be that
 8. Edit these configuration files
 9. Add ddmailerd to the default runlevel with `rc-update add ddmailerd default`
 10. Create user ddmailer with `useradd --system ddmailer`
-10. Start ddmailerd with `/etc/init.d/ddmailerd start`
-11. Test it with `echo -e "Subject: Test\r\nThis is a test" | sendmail info`
+11. Start ddmailerd with `/etc/init.d/ddmailerd start`
+12. Test it with `echo -e "Subject: Test\r\nThis is a test" | sendmail info`
 
 ## Installation: Gentoo
 
@@ -141,7 +141,7 @@ I created four ebuilds which can be found in the `portage` subdirectory:
 4. virtual/mta/mta-0.ebuild
 
 Copy these contents of `portage` into your local portage repository. You can
-find instruction for creating your own local portage repo in the [Gentoo Handbook](
+find instructions for creating your own local portage repo in the [Gentoo Handbook](
 https://wiki.gentoo.org/wiki/Handbook:AMD64/Portage/CustomTree#Defining_a_custom_ebuild_repository).
 
 Run `repoman manifest` in every ebuild directory (builds the Manifest file).
