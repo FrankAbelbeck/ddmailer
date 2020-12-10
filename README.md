@@ -31,47 +31,41 @@ DDMailer is divided in a server process called DDMailer Daemon (Disk And
 Execution MONitor), short *ddmailerd*, and a *sendmail* program. Both are
 written in Python so you can easily look what they are doing.
 
- * **ddmailerd** is listening on a localhost UDP port for messages. If it
-   receives a datagram "PID", ddmailerd answers with its process ID as an 8
-   bytes big-endian integer. Otherwise it parses the datagram as RFC compliant
-   e-mail, filters and delivers it to the defined accounts.
+ * **ddmailerd** is listening on a UNIX domain socket for messages. If it
+   receives bytes, it parses them as RFC compliant e-mail message, filters and
+   delivers it to the accounts defined in `ddmailerd.account.ini`.
 
  * **sendmail** reads stdin until either EOF or a line with a single dot is
    reached. Then it creates an RFC-compliant e-mail and addresses it to the
    recipients given as positional arguments. Or in other words: it mimics the
    original sendmail's behaviour except for any commandline options (ignored).
-   The created e-mail is sent to the UDP port of ddmailerd. To avoid size error
-   exceptions the e-mail is clipped at 65507 bytes (maximum datagram size
-   2**16-1 minus 8 bytes UDP header minus 20 bytes IPv4 header). 
+   The created e-mail is sent to the UNIX domain socket of ddmailerd.
 
 ## Daemon Commands
 
 ddmailerd accepts the following commands as single positional argument:
 
- * **start:** Start the program; reads the configuration files and listens on
-   the defined UDP port at localhost; if it receives a datagram with the bytes
-   "PID", then the program answers with its own PID, encoded as 8 bytes
-   big-endian integer. Has to be run as user root.
+This program accepts the following commands as positional argument:
 
- * **stop:** Stop the program; sends PID to the defined UDP port at localhost,
-   decodes the returned 8 bytes bid-endian integer and issues SIGTERM to that
-   PID. This in turn breaks the processing loop of the running program, so that
-   it gracefully terminates. Has to be run as user root.
+ * **start:** Start the program; reads the configuration files, writes PID file
+   and listens on the defined UNIX domain port. It accepts connections, reads
+   all transmitted data, processes the data as an e-mail message and delivers it
+   to the accounts.
+
+ * **stop:** Stop the program; retrieves PID from the PID file and sends SIGTERM
+   to that PID. This in turn breaks the processing loop of the running program,
+   so that it gracefully terminates.
    
- * **status:** Checks if someone is listening at the defined port by sending a
-   PID datagram. The program exits with the following codes (cf. [LSB 5.0](https://refspecs.linuxbase.org/LSB_5.0.0/LSB-Core-generic/LSB-Core-generic/iniscrptact.html)):
+ * **status:** Checks if a PID file and the UNIX domain socket exists.
+   The program exits with the following codes (cf. [Linux Standard Base 5.0](https://refspecs.linuxbase.org/LSB_5.0.0/LSB-Core-generic/LSB-Core-generic/iniscrptact.html)):
    
    * **0**   daemon is running or service is OK
    * **1**   daemon is dead and UDP socket is bound
    * **3**   daemon is not running
-   * **4**   daemon status is unknown
 
  * **info:** Print some information on ddmailerd.
  * **cfgMain:** Print contents of a basic main configuration file to stdout.
  * **cfgAccount:** Print contents of a basic account configuration file to stdout.
-
-ddmailerd does not manage a PID file. It uses the pre-defined UDP port as means
-of daemon control.
 
 ## Pathes
 
@@ -79,28 +73,31 @@ The sendmail program should be placed in /usr/sbin because some system tools
 have hard-coded pathes to the sendmail program.
 
 The ddmailerd program can be placed in either /usr/bin or /usr/sbin. According
-to the [FSH](https://refspecs.linuxbase.org/FHS_3.0/fhs/index.html), /usr/sbin
-is appropriate since normally root would start ddmailerd (which in turn drops
-privileges to the user ddmailer).
+to the [Filesystem Hierarchy Standard](https://refspecs.linuxbase.org/FHS_3.0/fhs/index.html),
+/usr/sbin is appropriate since normally root would start ddmailerd (which in
+turn drops privileges to the user ddmailer).
 
-The main configuration file "ddmailerd.ini" and the account configuration file
-"ddmailerd.account.ini" are expected to reside in /etc.
+The main configuration file `ddmailerd.ini` and the account configuration file
+`ddmailerd.account.ini` are expected to reside in `/etc`.
+
+PID file `ddmailerd.pid` and UNIX domain socket `ddmailerd.socket` are placed
+in `/run`.
 
 ## Configuration
 
 There are two different configuration files. Self-explaining examples can be
 obtained by calling `ddmailerd cfgMain` and `ddmailerd cfgAccount`.
 
- * **ddmailerd.ini** at least defines port and the socket timeout value. This
-   file is essential for both programs. In addition, daemon behaviour can be
-   tweaked and filters can be defined. In order to allow normal users to call
-   sendmail, file permissions should be less restrictive (0666).
+ * **ddmailerd.ini** allows tweaking the daemon behaviour.
    
  * **ddmailerd.account.ini** defines IMAP accounts and system-local mailboxes.
    It is split from the main configuration file in order to store sensitive
    information like username/password safely. File permissions should be
    restrictive (0600), as this file is only read by user root during start-up,
    before dropping privileges.
+
+DDMailer's socket is owned by `ddmailer:ddmailer`, chmod 0770, so that only
+users of group `ddmailer` can access it.
 
 If you intend to use a system-local mailbox, make sure that ddmailer as well as
 your users can access that mailbox. On my notebook I run the following setup for
@@ -161,6 +158,10 @@ emerge -1va virtual/mta
 
 ## Changelog
 
- * **2020-11-23** Initial commit; bugfixes (first time I wrote a complex ebuild)
-
+ * **2020-12-10** Migrated to AF_UNIX and SOCK_STREAM, i.e. to local UNIX domain
+   sockets and sequenced connection-based byte streams; this avoids the datagram
+   size limit and restricts access to users of the group "ddmailer"
+ 
  * **2020-11-27** Introduced message limit in sendmail to avoid errno 90 exceptions
+ 
+ * **2020-11-23** Initial commit; bugfixes (first time I wrote a complex ebuild)

@@ -19,11 +19,11 @@ along with this program.  If not, see <http://www.gnu.org/licenses/>.
 #
 # Modules, register of used objects and functions()
 #
-import configparser # ConfigParser, Error
 import datetime # datetime.now(), timezone.utc
 import email.parser # BytesParser
 import email.policy # SMTP
 import getpass  # getuser()
+import os.path # exists()
 import platform # node()
 import socket   # AF_INET, SOCK_DGRAM, socket
 import sys      # argv, exit(), stdin
@@ -33,9 +33,7 @@ import syslog   # LOG_ALERT, LOG_CRIT, LOG_DEBUG, LOG_EMERG, LOG_ERR, LOG_INFO,
 #
 # hard-wired: pathes according to the filesystem hierarchy; listening on localhost
 #
-PATH_CONFIG = "/etc/ddmailerd.ini"
-HOST_DAEMON = "localhost"
-LEN_DGRAM_MAX = 65507 # 2**16 -1 -8 -20
+PATH_SOCKET = "/run/ddmailerd.socket"
 
 # look-up table for print() version of mylog
 LUTPRIO = {
@@ -62,24 +60,6 @@ def mylog(priority=syslog.LOG_INFO,msg=""):
 if __name__ == "__main__":
 	hostname = platform.node()
 	syslog.openlog(ident="DDMailer sendmail",logoption=0,facility=syslog.LOG_MAIL)
-	
-	# read daemon configuration
-	cfgp = configparser.ConfigParser()
-	try:
-		cfgp.read(PATH_CONFIG)
-		if "daemon" not in cfgp:
-			raise configparser.Error("No daemon section")
-		try:
-			port_daemon = cfgp.getint("daemon","port")
-		except ValueError:
-			raise configparser.Error("No valid port integer defined")
-		try:
-			timeout_daemon = cfgp.getint("daemon","timeout")
-		except ValueError:
-			raise configparser.Error("No valid timeout integer defined")
-	except configparser.Error as e:
-			syslog.syslog(syslog.LOG_ERR,"Invalid configuration file ({})".format(e))
-			sys.exit(1)
 	
 	# process commandline arguments
 	# sys.argv[0] is the program file name
@@ -117,21 +97,21 @@ if __name__ == "__main__":
 	
 	# send message to daemon
 	try:
-		udp = socket.socket(family=socket.AF_INET,type=socket.SOCK_DGRAM)
-	except OSError as e:
-		mylog(syslog.LOG_ERR,"Could not open UDP socket")
+		usock = socket.socket(family=socket.AF_UNIX,type=socket.SOCK_STREAM)
+	except OSError:
+		mylog(syslog.LOG_ERR,"Could not open UNIX socket")
 		sys.exit(1)
 	
-	try:
-		udp.bind((HOST_DAEMON,port_daemon))
-	except OSError as e:
-		# bind failed: daemon listening; send message
-		udp.settimeout(timeout_daemon)
+	if os.path.exists(PATH_SOCKET):
+		# unix socket found: send message
 		try:
-			udp.sendmsg([message.as_bytes(policy=email.policy.SMTP)[0:LEN_DGRAM_MAX]],[],0,(HOST_DAEMON,port_daemon))
+			usock.connect(PATH_SOCKET)
+			usock.sendall(message.as_bytes(policy=email.policy.SMTP))
 		except OSError as e:
 			mylog(syslog.LOG_ERR,"Message not sent ({})".format(e))
 	else:
-		# bind succeeded: no daemon is listening: close, exit
-		udp.close()
 		mylog(syslog.LOG_ERR,"Could not send message, no active Dead Drop Mailer daemon found")
+	try:
+		usock.close()
+	except OSError:
+		pass

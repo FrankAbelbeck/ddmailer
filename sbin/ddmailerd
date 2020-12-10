@@ -52,10 +52,11 @@ SYSLOG_IDENT = "DDMailer daemon"
 PATH_CONFIG         = "/etc/ddmailerd.ini"
 PATH_CONFIG_ACCOUNT = "/etc/ddmailerd.account.ini"
 PATH_PID            = "/run/ddmailerd.pid"
-HOST_DAEMON         = "localhost"
+PATH_SOCKET         = "/run/ddmailerd.socket"
 DEFAULT_DAEMONISE   = True
 DEFAULT_LOG_LEVEL   = "info"
 DEFAULT_LOG_STDOUT  = False
+DEFAULT_SIZE_BUFFER = 4096
 USER_DAEMON = "ddmailer"
 
 
@@ -116,9 +117,9 @@ Returns:
 		syslog.openlog(ident=ident,logoption=0,facility=syslog.LOG_MAIL)
 		self._logLevel = self.LUT_STR2LEVEL[DEFAULT_LOG_LEVEL]
 		syslog.setlogmask(syslog.LOG_UPTO(self._logLevel))
-		self._logStdout = False
-		
-		self._doDaemonise = True
+		self._logStdout = DEFAULT_LOG_STDOUT
+		self._sizeBufferRead = DEFAULT_SIZE_BUFFER
+		self._doDaemonise = DEFAULT_DAEMONISE
 		
 		self._pathConfigAccount = str(pathConfigAccount)
 		self._pathConfigMain = str(pathConfigMain)
@@ -142,16 +143,10 @@ Raises:
 		cfgp.read(self._pathConfigMain)
 		
 		# required daemon settings
-		if "daemon" not in cfgp:
-			raise configparser.Error("No daemon section")
 		try:
-			self._portDaemon = cfgp.getint("daemon","port")
+			self._sizeBufferRead = cfgp.getint("daemon","buffer size",fallback=DEFAULT_SIZE_BUFFER)
 		except ValueError:
-			raise configparser.Error("No valid port integer defined")
-		try:
-			self._timeoutDaemon = cfgp.getint("daemon","timeout")
-		except ValueError:
-			raise configparser.Error("No valid timeout integer defined")
+			raise configparser.Error("No valid read buffer size defined")
 		
 		# optional deamon settings
 		try:
@@ -316,19 +311,22 @@ Raises:
 			self.log(syslog.LOG_INFO,"PID file found, daemon already started")
 			raise FileExistsError
 		
-		# check if socket can be bound
-		try:
-			udp = socket.socket(family=socket.AF_INET,type=socket.SOCK_DGRAM)
-			udp.bind((HOST_DAEMON,self._portDaemon))
-		except OSError as e:
-			self.log(syslog.LOG_ERR,"UDP port {}:{} in use".format(HOST_DAEMON,self._portDaemon))
-			raise e
-		
 		# parse account configuration file
 		try:
 			self.parseConfigAccount()
 		except (configparser.Error,FileExistsError) as e:
 			self.log(syslog.LOG_ERR,"Parsing account configuration file failed ({})".format(e))
+			raise e
+		
+		# prepare socket; tune file permissions
+		try:
+			usock = socket.socket(family=socket.AF_UNIX,type=socket.SOCK_STREAM)
+			usock.bind(PATH_SOCKET)
+			os.chmod(PATH_SOCKET,0o770)
+			p = pwd.getpwnam(USER_DAEMON)
+			os.chown(PATH_SOCKET,p.pw_uid,p.pw_gid)
+		except OSError as e:
+			self.log(syslog.LOG_ERR,"Failed to open UNIX socket {} ({})".format(PATH_SOCKET,e))
 			raise e
 		
 		# daemonise if necessary
@@ -367,103 +365,117 @@ Raises:
 		#     - check that message is well-formed (to, from and subject set)
 		#     - filter message
 		#     - write to all accounts
+		data = bytearray()
+		usock.listen()
 		try:
 			while True:
+				# simple stream handling:
+				# 1) accept connection
+				# 2) read until connection is exhausted (i.e. returns b"")
+				# 3) process buffered data
+				
 				self.log(syslog.LOG_DEBUG,"Waiting for messages")
-				data,ancdata,flags,sender = udp.recvmsg(65536)
-				if data == b"OK?":
-					# received challenge: respond with "OK!"
-					udp.sendmsg([b"OK!"],[],0,sender)
+				conn,addr = usock.accept()
+				while True:
+					b = conn.recv(self._sizeBufferRead)
+					if len(b) > 0:
+						data.extend(b)
+					else:
+						# no further bytes: connection closed, 
+						break
+				conn.close()
+				
+				# recevied a potential message: parse it
+				self.log(syslog.LOG_DEBUG,"Received a potential message (len={})".format(len(data)))
+				try:
+					message = parser.parsebytes(data)
+				except email.errors.MessageError as e:
+					self.log(syslog.LOG_WARNING,"Error while parsing message ({})".format(e))
+					continue
+				
+				if "To" not in message or "From" not in message or "Date" not in message:
+					self.log(syslog.LOG_WARNING,"Malformed message received")
+					continue
 					
-				else:
-					# recevied a potential message: parse it
-					self.log(syslog.LOG_DEBUG,"Received a potential message, parsing it")
-					try:
-						message = parser.parsebytes(data)
-					except email.errors.MessageError as e:
-						self.log(syslog.LOG_WARNING,"Error while parsing message ({})".format(e))
+				self.log(syslog.LOG_DEBUG,"Filtering well-formed message")
+				#
+				# well-formed message received: filter it
+				# this is done by by chaining all filter functions (partial patter.sub)
+				# empty address strings will be dropped
+				# if filtering leads to empty "From" or "To" fields, message will be discarded
+				#
+				# 1) "from" header field
+				addresses = []
+				for address in [i.strip() for i in message["From"].split(",")]:
+					address = address.strip()
+					for fun_sub in self._filters["from"]:
+						address = fun_sub(address)
+					addresses.append(address)
+				if len(addresses) == 0:
+					self.log(syslog.LOG_WARNING,"Filters yielded empty 'From' field, message discarded")
+					continue
+				del message["From"]
+				message["From"] = ", ".join(addresses)
+				
+				# 2) "to" header field
+				addresses = []
+				for address in [i.strip() for i in message["To"].split(",")]:
+					address = address.strip()
+					for fun_sub in self._filters["to"]:
+						address = fun_sub(address)
+					addresses.append(address)
+				if len(addresses) == 0:
+					self.log(syslog.LOG_WARNING,"Filters yielded empty 'To' field, message discarded")
+					continue
+				del message["To"]
+				message["To"] = ", ".join(addresses)
+				
+				# 3) "subject" header field
+				if message["Subject"]:
+					subject = message["Subject"].strip()
+					for fun_sub in self._filters["subject"]:
+						subject = fun_sub(subject)
+					if len(subject) == 0:
+						self.log(syslog.LOG_WARNING,"Filters yielded empty 'Subject' field, message discarded")
 						continue
-					
-					if "To" not in message or "From" not in message or "Date" not in message:
-						self.log(syslog.LOG_WARNING,"Malformed message received")
-						continue
-					
-					self.log(syslog.LOG_DEBUG,"Filtering well-formed message")
-					#
-					# well-formed message received: filter it
-					# this is done by by chaining all filter functions (partial patter.sub)
-					# empty address strings will be dropped
-					# if filtering leads to empty "From" or "To" fields, message will be discarded
-					#
-					# 1) "from" header field
-					addresses = []
-					for address in [i.strip() for i in message["From"].split(",")]:
-						address = address.strip()
-						for fun_sub in self._filters["from"]:
-							address = fun_sub(address)
-						addresses.append(address)
-					if len(addresses) == 0:
-						self.log(syslog.LOG_WARNING,"Filters yielded empty 'From' field, message discarded")
-						continue
-					del message["From"]
-					message["From"] = ", ".join(addresses)
-					
-					# 2) "to" header field
-					addresses = []
-					for address in [i.strip() for i in message["To"].split(",")]:
-						address = address.strip()
-						for fun_sub in self._filters["to"]:
-							address = fun_sub(address)
-						addresses.append(address)
-					if len(addresses) == 0:
-						self.log(syslog.LOG_WARNING,"Filters yielded empty 'To' field, message discarded")
-						continue
-					del message["To"]
-					message["To"] = ", ".join(addresses)
-					
-					# 3) "subject" header field
-					if message["Subject"]:
-						subject = message["Subject"].strip()
-						for fun_sub in self._filters["subject"]:
-							subject = fun_sub(subject)
-						if len(subject) == 0:
-							self.log(syslog.LOG_WARNING,"Filters yielded empty 'Subject' field, message discarded")
-							continue
-						del message["Subject"]
-						message["Subject"] = subject
-					
-					#
-					# append filtered message to given accounts
-					#
-					for account in self._accounts:
-						if isinstance(account,IMAPInfo):
-							self.log(syslog.LOG_DEBUG,"appending to IMAP account...")
-							# re-open connection to IMAP account via SSL
-							# append message to folder, logout
-							try:
-								imapbox = imaplib.IMAP4_SSL(account._host,account._port)
-								if account._doesCramMD5:
-									status,data = imapbox.login_cram_md5(account._user,account._pass)
-								else:
-									status,data = imapbox.login(account._user,account._pass)
-								if status == "OK":
-									status,data = imapbox.append(account._folder,None,None,message.as_bytes())
-									if status != "OK":
-										self.log(syslog.LOG_WARNING,"Could not append message to IMAP mailbox (data={})".format(data))
-									imapbox.logout()
-								else:
-									self.log(syslog.LOG_WARNING,"Could not log into IMAP account (data={})",format(data))
-							except imaplib.IMAP4.error:
-								self.log(syslog.LOG_WARNING,"Error while accessing IMAP account (data={})",format(data))
-							
-						elif isinstance(account,mailbox.Mailbox):
-							self.log(syslog.LOG_DEBUG,"appending to mailbox...")
-							# write to Maildir/MH mailboxes
-							try:
-								account.add(message)
-							except Exception as e:
-								self.log(syslog.LOG_WARNING,"Could not write to mailbox {} ({})",format(account._path,e))
-			
+					del message["Subject"]
+					message["Subject"] = subject
+				
+				#
+				# append filtered message to given accounts
+				#
+				for account in self._accounts:
+					if isinstance(account,IMAPInfo):
+						self.log(syslog.LOG_DEBUG,"appending to IMAP account...")
+						# re-open connection to IMAP account via SSL
+						# append message to folder, logout
+						try:
+							imapbox = imaplib.IMAP4_SSL(account._host,account._port)
+							if account._doesCramMD5:
+								status,data = imapbox.login_cram_md5(account._user,account._pass)
+							else:
+								status,data = imapbox.login(account._user,account._pass)
+							if status == "OK":
+								status,data = imapbox.append(account._folder,None,None,message.as_bytes())
+								if status != "OK":
+									self.log(syslog.LOG_WARNING,"Could not append message to IMAP mailbox (data={})".format(data))
+								imapbox.logout()
+							else:
+								self.log(syslog.LOG_WARNING,"Could not log into IMAP account (data={})",format(data))
+						except imaplib.IMAP4.error:
+							self.log(syslog.LOG_WARNING,"Error while accessing IMAP account (data={})",format(data))
+						
+					elif isinstance(account,mailbox.Mailbox):
+						self.log(syslog.LOG_DEBUG,"Appending to mailbox...")
+						# write to Maildir/MH mailboxes
+						try:
+							account.add(message)
+						except Exception as e:
+							self.log(syslog.LOG_WARNING,"Could not write to mailbox {} ({})",format(account._path,e))
+				
+				# clear buffer
+				del data[:]
+		
 		except KeyboardInterrupt:
 			# received signal to exit
 			# deal with a possible "hanging" accounts
@@ -479,9 +491,9 @@ Raises:
 			
 			# close UDP socket
 			try:
-				udp.close()
+				usock.close()
 			except OSError as e:
-				self.log(syslog.LOG_WARNING,"Could not close UDP socket")
+				self.log(syslog.LOG_WARNING,"Could not close UNIX socket ({})".format(e))
 			
 			self.log(syslog.LOG_INFO,"Dead Drop Mailer daemon stopped")
 	
@@ -493,49 +505,43 @@ Raises:
 			self.log(syslog.LOG_ERR,"Only root stops the daemon")
 			raise PermissionError
 		
-		# Retrieve PID
+		# Retrieve PID, send SIGTERM to process and wait for termination
 		try:
 			with open(PATH_PID,"r") as f:
 				pid = int(f.read())
-		except FileNotFoundError:
-			self.log(syslog.LOG_INFO,"PID file not found, daemon seems inactive")
-			return
-		except (PermissionError,OSError,TypeError,ValueError):
-			self.log(syslog.LOG_WARNING,"Could not parse PID file, daemon did not start properly")
-			return
-		
-		# Send SIGTERM to PID
-		try:
 			os.kill(pid,signal.SIGTERM)
-		except ProcessLookupError as e:
-			self.log(syslog.LOG_WARNING,"Could not find process {}, removing stale PID file".format(pid))
-			os.remove(PATH_PID)
-			return
-		except PermissionError as e:
-			# should not occur, since only root is allowed to handle daemon shutdown
-			self.log(syslog.LOG_INFO,"You are not allowed to shutdown the daemon")
-			raise e
-		
-		# Wait for termination and remove PID file
-		try:
 			os.waitpid(pid,0)
+		except ProcessLookupError:
+			self.log(syslog.LOG_WARNING,"Could not find process {}".format(pid))
 		except ChildProcessError:
 			pass # nevermind, PID already has terminated
+		except FileNotFoundError:
+			self.log(syslog.LOG_INFO,"PID file not found, daemon seems inactive")
+		except (PermissionError,OSError,TypeError,ValueError) as e:
+			self.log(syslog.LOG_WARNING,"Error processing PID file ({})".format(e))
+			raise e
+		
+		# remove PID file, ignore errors
 		try:
 			os.remove(PATH_PID)
-		except OSError as e:
-			self.log(syslog.LOG_INFO,"Error during process shutdown")
-			raise e
+		except OSError:
+			pass
+		
+		# remove socket file, ignore errors
+		try:
+			os.remove(PATH_SOCKET)
+		except OSError:
+			pass
+		
 	
 	
 	def status(self):
 		"""Check status of daemon and exit with a code describing the status.
 
 Exit code is chosen according to the Linux Standard Base 5.0:
-   0: daemon is running or service is OK
-   1: daemon is dead and UDP socket is bound
+   0: daemon is running
+   1: daemon is dead
    3: daemon is not running
-   4: daemon status is unknown
 """
 		# parse main configuration file without filter sections
 		self.parseConfigMain()
@@ -553,27 +559,19 @@ Exit code is chosen according to the Linux Standard Base 5.0:
 		# 150-199   reserved for application use
 		# 200-254   reserved
 		if os.path.exists(PATH_PID):
-			try:
-				udp = socket.socket(family=socket.AF_INET,type=socket.SOCK_DGRAM)
-				udp.settimeout(self._timeoutDaemon)
-				udp.sendmsg([b"OK?"],[],0,(HOST_DAEMON,self._portDaemon))
-				try:
-					data,ancdata,flags,sender = udp.recvmsg(65536)
-				except socket.timeout:
-					# someone listening, but not responding to challenge
-					sys.exit(1)
-				if data == "bOK!":
-					# correct response, daemon is OK
-					sys.exit(0)
-				else:
-					# someone listening, but not responding to challenge
-					sys.exit(1)
-			except OSError as e:
-				self.log(syslog.LOG_ERR,"UDP communication failed, daemon state unknown ({e})".format(e))
-				sys.exit(4)
+			if os.path.exists(PATH_SOCKET):
+				# both PID and UNIX socket file exist: up and running
+				sys.exit(0)
+			else:
+				# only PID file exists: program seems dead
+				sys.exit(1)
 		else:
-			# no PID file found: deamon not active
-			sys.exit(3)
+			if os.path.exists(PATH_SOCKET):
+				# only UNIX socket file exists: program seems dead
+				sys.exit(1)
+			else:
+				# oneither PID file nor socket file exist: program is not running
+				sys.exit(3)
 	
 	
 	def printInfo(self):
@@ -586,7 +584,7 @@ Overview
 --------
 
 This is a mail transfer deamon, handling system-local e-mails. It will accept
-messages on a given local UDP port and will add them to mailboxes or IMAP
+messages on a given UNIX domain socket and will add them to mailboxes or IMAP
 accounts defined in the configuration files. In addition, filters can be applied
 to the header fields "From", "To" and "Subject".
 
@@ -596,20 +594,18 @@ Commands
 This program accepts the following commands as positional argument:
 
    start:   Start the program; reads the configuration files, writes PID file
-            and listens on the defined UDP port at localhost; if it receives a
-            datagram with the bytes "OK?", it responds wit "OK!". Otherwise it
-            processes the message and delivers it to the accounts.
+            and listens on the defined UNIX domain port. It accepts connections,
+            reads all transmitted data, processes the data as an e-mail message
+            and delivers it to the accounts.
    stop:    Stop the program; retrieves PID from the PID file and sends SIGTERM
             to that PID. This in turn breaks the processing loop of the running
             program, so that it gracefully terminates.
-   status:  Checks if a PID file existis. If that's the case, it challenges the
-            daemon with "OK?". The program exits with the following codes
-            (cf. Linux Standard Base 5.0):
+   status:  Checks if a PID file and the UNIX domain socket exists. The program
+            exits with the following codes (cf. Linux Standard Base 5.0)
             
-              0: PID file exists, daemon respons with "OK!"; service is OK
-              1: PID file exists, but no or wrong response; service not OK
-              3: PID file does not exist; service is not running
-              4: PID file exists, but UDP communication failed; status unknown
+              0: PID file AND socket file exist; service is OK
+              1: PID file OR socket file exist; service not OK
+              3: Neither PID file nor socket file exist; service is not running
               
    info:       [this text]
    cfgMain:    Print contents of a basic main configuration file to stdout.
@@ -622,14 +618,15 @@ This program accepts the following commands as positional argument:
 # INI file syntax; comments begin either with a # or a ;
 # Explanations are commented out with #
 # Example values are commented out with ;
-#
-# You have to define port and timeout in a section called "daemon"
-# as there are no defaults for it
-#
-[daemon]
-# required: port to listen on and socket timeout in seconds
-port = 4242
-timeout = 1
+
+# Daemon options (if not specified, falls back to listed default values)
+
+;[daemon]
+
+# Option: socket read buffer
+# Values: integer [bytes], preferably a power of two like 4096
+# Default: {SIZE_BUFFER}
+;read buffer = {SIZE_BUFFER}
 
 # Option: Should program background itself?
 # Values: yes no
@@ -679,6 +676,7 @@ timeout = 1
 ;regex = bla
 ;subst = ble
 """.format(
+		SIZE_BUFFER = DEFAULT_SIZE_BUFFER,
 		DAEMONISE = PY2CFG_BOOL[DEFAULT_DAEMONISE],
 		LOGLEVEL  = DEFAULT_LOG_LEVEL,
 		LOGSTDOUT = PY2CFG_BOOL[DEFAULT_LOG_STDOUT])
@@ -850,8 +848,9 @@ if __name__ == "__main__":
 	args = parser.parse_args()
 	try:
 		args.f()
-	except AttributeError:
+	except AttributeError as e:
 		daemon.printInfo()
 	except Exception as e:
+		daemon.log(syslog.LOG_WARNING,"Daemon crashed ({})".format(e))
 		sys.exit(4)
 	
