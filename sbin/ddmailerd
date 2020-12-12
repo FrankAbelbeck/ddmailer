@@ -495,12 +495,6 @@ Raises:
 			except OSError as e:
 				self.log(syslog.LOG_WARNING,"Could not close UNIX socket ({})".format(e))
 			
-			# remove socket file, ignore errors
-			try:
-				os.remove(PATH_SOCKET)
-			except OSError as e:
-				self.log(syslog.LOG_WARNING,"Could not remove UNIX socket file ({})".format(e))
-			
 			self.log(syslog.LOG_INFO,"Dead Drop Mailer daemon stopped")
 	
 	
@@ -531,7 +525,13 @@ Raises:
 		try:
 			os.remove(PATH_PID)
 		except OSError:
-			pass
+			self.log(syslog.LOG_WARNING,"Could not remove PID file ({})".format(e))
+		
+		# remove socket file, ignore errors
+		try:
+			os.remove(PATH_SOCKET)
+		except OSError as e:
+			self.log(syslog.LOG_WARNING,"Could not remove UNIX socket file ({})".format(e))
 	
 	
 	def status(self):

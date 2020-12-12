@@ -16,12 +16,19 @@
 # along with this program.  If not, see <http://www.gnu.org/licenses/>.
 
 description="ddmailerd - Dead Drop Mailer Daemon"
-command="/usr/sbin/ddmailerd"
-command_args="start"
-pidfile="/run/ddmailerd.pid"
-stopsig="SIGTERM"
-start_stop_daemon_args="--wait 100"
 
 depend() {
 	use net dns logger
+}
+
+start() {
+	ebegin "Starting DDMailer daemon"
+	/usr/sbin/ddmailerd start
+	eend $?
+}
+
+stop() {
+	ebegin "Stopping DDMailer daemon"
+	/usr/sbin/ddmailerd start
+	eend $?
 }
