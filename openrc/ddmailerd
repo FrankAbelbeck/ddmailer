@@ -29,6 +29,6 @@ start() {
 
 stop() {
 	ebegin "Stopping DDMailer daemon"
-	/usr/sbin/ddmailerd start
+	/usr/sbin/ddmailerd stop
 	eend $?
 }

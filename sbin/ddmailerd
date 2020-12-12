@@ -525,13 +525,13 @@ Raises:
 		try:
 			os.remove(PATH_PID)
 		except OSError:
-			self.log(syslog.LOG_WARNING,"Could not remove PID file ({})".format(e))
+			pass
 		
 		# remove socket file, ignore errors
 		try:
 			os.remove(PATH_SOCKET)
 		except OSError as e:
-			self.log(syslog.LOG_WARNING,"Could not remove UNIX socket file ({})".format(e))
+			pass
 	
 	
 	def status(self):

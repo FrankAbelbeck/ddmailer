@@ -97,21 +97,11 @@ if __name__ == "__main__":
 	
 	# send message to daemon
 	try:
-		usock = socket.socket(family=socket.AF_UNIX,type=socket.SOCK_STREAM)
-	except OSError:
-		mylog(syslog.LOG_ERR,"Could not open UNIX socket")
-		sys.exit(1)
-	
-	if os.path.exists(PATH_SOCKET):
-		# unix socket found: send message
-		try:
-			usock.connect(PATH_SOCKET)
-			usock.sendall(message.as_bytes(policy=email.policy.SMTP))
-		except OSError as e:
-			mylog(syslog.LOG_ERR,"Message not sent ({})".format(e))
-	else:
-		mylog(syslog.LOG_ERR,"Could not send message, no active Dead Drop Mailer daemon found")
-	try:
-		usock.close()
-	except OSError:
-		pass
+		with socket.socket(family=socket.AF_UNIX,type=socket.SOCK_STREAM) as usock:
+			try:
+				usock.connect(PATH_SOCKET)
+				usock.sendall(message.as_bytes(policy=email.policy.SMTP))
+			except OSError as e:
+				mylog(syslog.LOG_ERR,"Message not sent ({})".format(e))
+	except OSError as e:
+		mylog(syslog.LOG_ERR,"Could not open UNIX socket ({})".format(e))
