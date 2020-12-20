@@ -12,15 +12,25 @@ EGIT_REPO_URI="https://github.com/FrankAbelbeck/ddmailer.git"
 SLOT="0"
 
 pkg_pretend() {
-	# check for existing /usr/sbin/sendmail program not belonging to ddmailer
+	# check for existing sendmail program not belonging to ddmailer
 	# if found, that collision is not resolvable
-	[ -e /usr/sbin/sendmail ] && [[ "$(equery --quiet belongs /usr/sbin/sendmail)" != "mail-mta/ddmailer-9999" ]] && die "Found an existing sendmail program not belonging to ddmailer. Sorry, cannot install DDMailer alongside another MTA."
+	for FILE in /usr/sbin/sendmail /usr/bin/sendmail; do
+		if [ -e $FILE ] && [[ "$(equery --quiet belongs $FILE)" != "mail-mta/ddmailer-9999" ]]; then
+			die "Found existing program $FILE not belonging to ddmailer. Sorry, cannot install DDMailer alongside another MTA."
+		fi
+	done
+	einfo "No existing sendmail programs detected."
 }
 
 src_install() {
 	# install programs and the init script
 	dosbin  ${S}/sbin/ddmailerd
 	dosbin  ${S}/sbin/sendmail
+	
+	# necessary since some programs have hard-coded paths to /usr/bin/sendmail
+	# (looking at you, cronie!)
+	dosym /usr/sbin/sendmail /usr/bin/sendmail
+	
 	doinitd ${S}/openrc/ddmailerd
 	# extract example configuration files and place them in /etc
 	# set permission so that main config is readable by all and account config
