@@ -28,7 +28,6 @@ src_install() {
 	dosbin  ${S}/sbin/sendmail
 	
 	# necessary since some programs have hard-coded paths to /usr/bin/sendmail
-	# (looking at you, cronie!)
 	dosym /usr/sbin/sendmail /usr/bin/sendmail
 	
 	doinitd ${S}/openrc/ddmailerd

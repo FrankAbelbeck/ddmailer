@@ -358,14 +358,15 @@ Raises:
 		# central processing loop:
 		#  - loop forever
 		#  - only terminated by exception (KeyboardInterrupt, triggered by signal SIGTERM)
-		#  - UDP-controlled: wait until new message arrives; process message
+		#  - stream-controlled: wait until new bytes arrives; process bytes
+		#    (for now, this assumes that all message bytes of a connection are sent
+		#    in one go; thus message boundaries or header data are not yet necessary)
 		#  - message processing:
-		#     - check if it's a command ("PID"), answer it
-		#     - otherwise parse message bytes into email.message.Message object
+		#     - parse message bytes into email.message.Message object
 		#     - check that message is well-formed (to, from and subject set)
 		#     - filter message
 		#     - write to all accounts
-		data = bytearray()
+		bufferMsg = bytearray()
 		usock.listen()
 		try:
 			while True:
@@ -374,29 +375,41 @@ Raises:
 				# 2) read until connection is exhausted (i.e. returns b"")
 				# 3) process buffered data
 				
-				self.log(syslog.LOG_DEBUG,"Waiting for messages")
-				conn,addr = usock.accept()
-				while True:
-					b = conn.recv(self._sizeBufferRead)
-					if len(b) > 0:
-						data.extend(b)
-					else:
-						# no further bytes: connection closed, 
-						break
-				conn.close()
-				
-				# recevied a potential message: parse it
-				self.log(syslog.LOG_DEBUG,"Received a potential message (len={})".format(len(data)))
+				# first things first: clear buffer
+				del bufferMsg[:]
 				try:
-					message = parser.parsebytes(data)
+					self.log(syslog.LOG_DEBUG,"Waiting for messages")
+					conn,addr = usock.accept()
+					while True:
+						b = conn.recv(self._sizeBufferRead)
+						if len(b) > 0:
+							bufferMsg.extend(b)
+						else:
+							# no further bytes: connection closed, 
+							break
+					conn.close()
+				except OSerror as e:
+					self.log(syslog.LOG_WARNING,"OS Error while reading message ({})".format(e))
+					continue
+				except Exception as e: # make sure no uncaught exception crashes the daemon
+					self.log(syslog.LOG_WARNING,"Unknown error while reading message ({})".format(e))
+					continue
+					
+				# recevied a potential message: parse it
+				self.log(syslog.LOG_DEBUG,"Received a potential message (len={})".format(len(bufferMsg)))
+				try:
+					message = parser.parsebytes(bufferMsg)
 				except email.errors.MessageError as e:
 					self.log(syslog.LOG_WARNING,"Error while parsing message ({})".format(e))
+					continue
+				except Exception as e: # make sure no uncaught exception crashes the daemon
+					self.log(syslog.LOG_WARNING,"Unknown Error while parsing message ({})".format(e))
 					continue
 				
 				if "To" not in message or "From" not in message or "Date" not in message:
 					self.log(syslog.LOG_WARNING,"Malformed message received")
 					continue
-					
+				
 				self.log(syslog.LOG_DEBUG,"Filtering well-formed message")
 				#
 				# well-formed message received: filter it
@@ -464,17 +477,16 @@ Raises:
 								self.log(syslog.LOG_WARNING,"Could not log into IMAP account (data={})",format(data))
 						except imaplib.IMAP4.error:
 							self.log(syslog.LOG_WARNING,"Error while accessing IMAP account (data={})",format(data))
+						except Exception as e: # make sure no uncaught exception crashes the daemon
+							self.log(syslog.LOG_WARNING,"Unknown error while accessing IMAP account ({})",format(e))
 						
 					elif isinstance(account,mailbox.Mailbox):
 						self.log(syslog.LOG_DEBUG,"Appending to mailbox...")
 						# write to Maildir/MH mailboxes
 						try:
 							account.add(message)
-						except Exception as e:
+						except Exception as e: # make sure no uncaught exception crashes the daemon
 							self.log(syslog.LOG_WARNING,"Could not write to mailbox {} ({})",format(account._path,e))
-				
-				# clear buffer
-				del data[:]
 		
 		except KeyboardInterrupt:
 			# received signal to exit
