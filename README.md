@@ -39,7 +39,9 @@ written in Python so you can easily look what they are doing.
    reached. Then it creates an RFC-compliant e-mail and addresses it to the
    recipients given as positional arguments. Or in other words: it mimics the
    original sendmail's behaviour except for any commandline options (ignored).
-   The created e-mail is sent to the UNIX domain socket of ddmailerd.
+   The created e-mail is sent to the UNIX domain socket of ddmailerd. As of
+   2020-12-21 sendmail does not need any command line arguments as long as the
+   message contains a To field (matching cronies behaviour).
 
 ## Daemon Commands
 
@@ -116,17 +118,18 @@ NOTE: If you've already installed another MTA it might be that
 /usr/sbin/sendmail exists. In that case it's up to you to resolve the conflict.
 
 1. Place `$GITDIR/sbin/ddmailerd` and `$GITDIR/sbin/sendmail` in `/usr/sbin/`
-2. Place `$GITDIR/openrc/ddmailerd` in `/etc/init.d/`
-3. Set permissions with `chmod 755 /etc/init.d/ddmailerd /usr/sbin/ddmailerd /usr/sbin/sendmail`
-4. Create basic main configuration file with `/usr/sbin/ddmailerd cfgMain > /etc/ddmailerd.ini`
-5. Create basic account configuration file with `/usr/sbin/ddmailerd cfgAccount > /etc/ddmailerd.account.ini`
-6. Set permission on main configuration file with `chmod 666 /etc/ddmailerd.ini`
-7. Set permission on account configuration file with `chmod 600 /etc/ddmailerd.account.ini`
-8. Edit these configuration files
-9. Add ddmailerd to the default runlevel with `rc-update add ddmailerd default`
-10. Create user ddmailer with `useradd --system ddmailer`
-11. Start ddmailerd with `/etc/init.d/ddmailerd start`
-12. Test it with `echo -e "Subject: Test\r\nThis is a test" | sendmail info`
+2. Symlink sendmail with `ln /usr/sbin/sendmail /usr/bin/sendmail` 
+3. Place `$GITDIR/openrc/ddmailerd` in `/etc/init.d/`
+4. Set permissions with `chmod 755 /etc/init.d/ddmailerd /usr/sbin/ddmailerd /usr/sbin/sendmail`
+5. Create basic main configuration file with `/usr/sbin/ddmailerd cfgMain > /etc/ddmailerd.ini`
+6. Create basic account configuration file with `/usr/sbin/ddmailerd cfgAccount > /etc/ddmailerd.account.ini`
+7. Set permission on main configuration file with `chmod 666 /etc/ddmailerd.ini`
+8. Set permission on account configuration file with `chmod 600 /etc/ddmailerd.account.ini`
+9. Edit these configuration files
+10. Add ddmailerd to the default runlevel with `rc-update add ddmailerd default`
+11. Create user ddmailer with `useradd --system ddmailer`
+12. Start ddmailerd with `/etc/init.d/ddmailerd start`
+13. Test it with `echo -e "Subject: Test\r\nThis is a test" | sendmail info`
 
 ## Installation: Gentoo
 
@@ -158,6 +161,11 @@ emerge -1va virtual/mta
 
 ## Changelog
 
+ * **2020-12-21** Fixed stream buffer handling in main loop (name collision with
+   data returned by imap, leading to a crash); tuned sendmail behaviour to 
+   cronies behaviour (CLI arguments are optional as long as To is populated in
+   the message passed via stdin)
+ 
  * **2020-12-10** Migrated to AF_UNIX and SOCK_STREAM, i.e. to local UNIX domain
    sockets and sequenced connection-based byte streams; this avoids the datagram
    size limit and restricts access to users of the group "ddmailer"
