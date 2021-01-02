@@ -94,6 +94,15 @@ Examples:
 			if "@" not in arg: arg = arg + "@" + hostname
 			recipients.append(arg)
 	
+	# read message from stdin until EOF or a line with a single dot.
+	# read directly from buffer in order to obtain bytes
+	messageBytes = b""
+	for line in sys.stdin.buffer:
+		if line == b".\n": break
+		messageBytes = messageBytes + line
+	parser = email.parser.BytesParser(policy=email.policy.SMTP)
+	message = parser.parsebytes(messageBytes)
+	
 	# 2020-12-21: tuned behaviour to match cronie's mailing behaviour
 	#  - recipients passed as arguments replace any To field in the message
 	#  - if no recipients were passed as arguments, check that To is populated
@@ -108,15 +117,6 @@ Examples:
 		# use recipients passed as arguments
 		del message["To"]
 		message["To"] = ", ".join(recipients)
-	
-	# read message from stdin until EOF or a line with a single dot.
-	# read directly from buffer in order to obtain bytes
-	messageBytes = b""
-	for line in sys.stdin.buffer:
-		if line == b".\n": break
-		messageBytes = messageBytes + line
-	parser = email.parser.BytesParser(policy=email.policy.SMTP)
-	message = parser.parsebytes(messageBytes)
 	
 	# construct message by rewriting To, From and Date
 	del message["From"]

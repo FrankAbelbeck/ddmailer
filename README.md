@@ -39,9 +39,12 @@ written in Python so you can easily look what they are doing.
    reached. Then it creates an RFC-compliant e-mail and addresses it to the
    recipients given as positional arguments. Or in other words: it mimics the
    original sendmail's behaviour except for any commandline options (ignored).
-   The created e-mail is sent to the UNIX domain socket of ddmailerd. As of
-   2020-12-21 sendmail does not need any command line arguments as long as the
-   message contains a To field (matching cronies behaviour).
+   The created e-mail is sent to the UNIX domain socket of ddmailerd.
+   As of 2020-12-21 sendmail does not need any command line arguments as long
+   as the message contains a To field (matching cronies behaviour).
+   As of 2021-01-02 sendmail accepts the positional argument "--subject=SUBJECT"
+   in order to define a custom subject line (overriding any subject info given
+   in the message passed).
 
 ## Daemon Commands
 

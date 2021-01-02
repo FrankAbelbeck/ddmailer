@@ -15,7 +15,7 @@ pkg_pretend() {
 	# check for existing sendmail program not belonging to ddmailer
 	# if found, that collision is not resolvable
 	for FILE in /usr/sbin/sendmail /usr/bin/sendmail; do
-		if [ -e $FILE ] && [[ "$(equery --quiet belongs $FILE)" != "mail-mta/ddmailer-9999" ]]; then
+		if [ -e $FILE ] && [[ "$(equery --quiet belongs --early-out $FILE)" != "mail-mta/ddmailer-9999" ]]; then
 			die "Found existing program $FILE not belonging to ddmailer. Sorry, cannot install DDMailer alongside another MTA."
 		fi
 	done
