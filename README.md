@@ -164,6 +164,8 @@ emerge -1va virtual/mta
 
 ## Changelog
 
+ * **2021-01-02** Added support for custom subjects to sendmail.
+ 
  * **2020-12-21** Fixed stream buffer handling in main loop (name collision with
    data returned by imap, leading to a crash); tuned sendmail behaviour to 
    cronies behaviour (CLI arguments are optional as long as To is populated in
