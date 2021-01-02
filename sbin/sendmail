@@ -66,20 +66,33 @@ if __name__ == "__main__":
 	# get all positional arguments (i.e. not starting with -)
 	# these are the recipients; strip any @hostname as it is rewritten anyway
 	recipients = []
+	subject = ""
 	for arg in sys.argv[1:]:
-		if arg[0] != "-":
+		if arg.startswith("--subject="):
+			# convenience function: accept subject argument
+			subject = arg[10:]
+		elif arg == "--help":
+			print("""Usage: sendmail [--help|--subject SUBJECT|RECIPIENT]...
+
+Reads stdin until it encounters EOF or a line with a single dot.
+Creates an e-mail message from the input and sends it to the DDMailer daemon.
+
+Arguments:
+   --help: display this help.
+   --subject=SUBJECT: set the e-mail's subject to SUBJECT; overrides Subject
+                      lines in the message text.
+   RECIPIENT: one or more recipients of the message; overrides To lines in the
+              message text; if no recipients given or no 
+
+Examples:
+   echo "Test" | sendmail info --subject "Test mail"
+   myCommandProducingOutput | sendmail info
+""")
+			sys.exit(0)
+		elif arg[0] != "-":
 			# only process non-positional arguments, i.e. not starting with a dash
 			if "@" not in arg: arg = arg + "@" + hostname
 			recipients.append(arg)
-	
-	# read message from stdin until EOF or a line with a single dot.
-	# read directly from buffer in order to obtain bytes
-	messageBytes = b""
-	for line in sys.stdin.buffer:
-		if line == b".\n": break
-		messageBytes = messageBytes + line
-	parser = email.parser.BytesParser(policy=email.policy.SMTP)
-	message = parser.parsebytes(messageBytes)
 	
 	# 2020-12-21: tuned behaviour to match cronie's mailing behaviour
 	#  - recipients passed as arguments replace any To field in the message
@@ -96,6 +109,15 @@ if __name__ == "__main__":
 		del message["To"]
 		message["To"] = ", ".join(recipients)
 	
+	# read message from stdin until EOF or a line with a single dot.
+	# read directly from buffer in order to obtain bytes
+	messageBytes = b""
+	for line in sys.stdin.buffer:
+		if line == b".\n": break
+		messageBytes = messageBytes + line
+	parser = email.parser.BytesParser(policy=email.policy.SMTP)
+	message = parser.parsebytes(messageBytes)
+	
 	# construct message by rewriting To, From and Date
 	del message["From"]
 	message["From"] = getpass.getuser().partition("@")[0] + "@" + platform.node()
@@ -103,6 +125,11 @@ if __name__ == "__main__":
 	now = datetime.datetime.now(datetime.timezone.utc)
 	del message["Date"]
 	message["Date"] = now
+	
+	# 2021-01-02: add subject if passed as argument
+	if len(subject) > 0:
+		del message["Subject"]
+		message["Subject"] = subject
 	
 	# send message to daemon
 	try:
